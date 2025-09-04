@@ -2,13 +2,17 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <title>階層メモ帳</title>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
-  <style>body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Roboto",sans-serif}</style>
+  <style>
+    body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Roboto",sans-serif}
+    .drop-hint{height:4px;border-radius:9999px}
+    input, textarea { font-size: 16px; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
@@ -33,30 +37,34 @@
         <line x1="15" y1="3" x2="15" y2="21"></line>
       </svg>
     );
+    const Grip        = ({ size=18 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="7" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="17" cy="6" r="1.5"/>
+        <circle cx="7" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="17" cy="12" r="1.5"/>
+        <circle cx="7" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="17" cy="18" r="1.5"/>
+      </svg>
+    );
 
-    /* ===== Utils ===== */
+    /* ===== Utils & Keys ===== */
     const clone = (o) => JSON.parse(JSON.stringify(o));
-    const STORAGE_KEY = 'hn_items_v2';
+    const STORAGE_KEY   = 'hn_items_v3';
+    const GIST_TOKEN_KEY= 'hn_gist_token';
+    const GIST_ID_KEY   = 'hn_gist_id';
+    const AUTO_PUSH_KEY = 'hn_gist_auto_push';
 
-    // サンプル初期データ（複製関数）
     const sampleItems = () => ([
-      {
-        id: '1', type: 'folder', name: 'プロジェクト', expanded: true,
+      { id: '1', type: 'folder', name: 'プロジェクト', expanded: true,
         children: [
           { id: '2', type: 'note', name: 'アイデア', content: 'ここにメモの内容を書きます...', blocks: [] },
           { id: '3', type: 'folder', name: '設計', expanded: false,
             children: [{ id: '4', type: 'note', name: 'UI設計', content: 'UIの検討事項', blocks: [] }] }
-        ]
-      },
+        ]},
       { id: '5', type: 'note', name: '日記', content: '今日は良い一日でした。', blocks: [] }
     ]);
 
-    // 古いデータのマイグレーション（noteにblocksが無ければ付与）
     function migrateItems(items) {
       const walk = (arr) => arr.map(it => {
-        if (it.type === 'note') {
-          return { ...it, blocks: Array.isArray(it.blocks) ? it.blocks : [], content: typeof it.content === 'string' ? it.content : '' };
-        }
+        if (it.type === 'note') return { ...it, blocks: Array.isArray(it.blocks)?it.blocks:[], content: typeof it.content==='string'?it.content:'' };
         if (it.children) return { ...it, children: walk(it.children) };
         return it;
       });
@@ -74,16 +82,13 @@
       }
       return null;
     }
-
     function getArrayFromParentPath(rootClone, parentPath) {
-      let arr = rootClone;
-      let obj = null;
+      let arr = rootClone, obj = null;
       for (const token of parentPath) {
         if (token === 'children') {
           if (!obj) throw new Error('Invalid path: children without object');
           if (!Array.isArray(obj.children)) obj.children = [];
-          arr = obj.children;
-          obj = null;
+          arr = obj.children; obj = null;
         } else {
           obj = arr[token];
           if (!obj) throw new Error('Invalid path index');
@@ -91,7 +96,6 @@
       }
       return arr;
     }
-
     function removeByPath(items, fullPath) {
       const cloned = clone(items);
       const parentPath = fullPath.slice(0, -1);
@@ -100,7 +104,6 @@
       const removed = parentArr.splice(index, 1)[0];
       return { newItems: cloned, removed };
     }
-
     function insertIntoParentPath(items, parentPath, index, node) {
       const cloned = clone(items);
       const targetArr = getArrayFromParentPath(cloned, parentPath);
@@ -108,21 +111,77 @@
       targetArr.splice(safeIndex, 0, node);
       return cloned;
     }
-
     function getParentPathAndIndex(path) {
       return { parentPath: path.slice(0, -1), index: path[path.length - 1] };
+    }
+    const newId = (p='id') => `${p}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+
+    /* ===== GitHub Gist API helpers ===== */
+    const GH_API = 'https://api.github.com';
+
+    async function ghFetch(token, path, method='GET', body=null, scheme='token') {
+      const headers = {
+        'Accept':'application/vnd.github+json',
+        'X-GitHub-Api-Version':'2022-11-28',
+        'Authorization': `${scheme} ${token}`
+      };
+      const res = await fetch(`${GH_API}${path}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : null,
+      });
+      if (res.status === 401 && scheme === 'token') {
+        // 401 の場合は Bearer でもう一度（fine-grained 対応）
+        return ghFetch(token, path, method, body, 'Bearer');
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(()=> '');
+        throw new Error(`GitHub API ${res.status}: ${text||res.statusText}`);
+      }
+      return res.json();
+    }
+
+    async function gistCreate(token, items) {
+      const body = {
+        description: 'Hierarchical Notepad data (notes.json)',
+        public: false,
+        files: { 'notes.json': { content: JSON.stringify(items, null, 2) } }
+      };
+      const json = await ghFetch(token, '/gists', 'POST', body);
+      return json.id;
+    }
+
+    async function gistUpdate(token, gistId, items) {
+      const body = { files: { 'notes.json': { content: JSON.stringify(items, null, 2) } } };
+      await ghFetch(token, `/gists/${gistId}`, 'PATCH', body);
+    }
+
+    async function gistFetch(token, gistId) {
+      const json = await ghFetch(token, `/gists/${gistId}`, 'GET');
+      const file = json.files?.['notes.json'];
+      if (!file) throw new Error('notes.json が見つかりません。');
+      if (file.truncated && file.raw_url) {
+        const raw = await fetch(file.raw_url).then(r=>r.text());
+        return JSON.parse(raw);
+      }
+      if (typeof file.content === 'string') {
+        return JSON.parse(file.content);
+      }
+      // 最終手段：raw_url があれば読む
+      if (file.raw_url) {
+        const raw = await fetch(file.raw_url).then(r=>r.text());
+        return JSON.parse(raw);
+      }
+      throw new Error('Gist の内容を取得できませんでした。');
     }
 
     /* ===== App ===== */
     const HierarchicalNotepad = () => {
-      // 初期ロード：localStorage → 無ければサンプル
+      // localStorage → 既存 or サンプル
       const [items, setItems] = React.useState(() => {
         try {
           const raw = localStorage.getItem(STORAGE_KEY);
-          if (raw) {
-            const data = JSON.parse(raw);
-            if (Array.isArray(data)) return migrateItems(data);
-          }
+          if (raw) { const data = JSON.parse(raw); if (Array.isArray(data)) return migrateItems(data); }
         } catch {}
         return sampleItems();
       });
@@ -131,8 +190,8 @@
       const [editingItem, setEditingItem] = React.useState(null);
       const [editValue, setEditValue] = React.useState('');
       const [draggedId, setDraggedId] = React.useState(null);
-      const [dropHint, setDropHint] = React.useState(null); // {targetId, pos:'before'|'after'}
-      const [highlightFolderId, setHighlightFolderId] = React.useState(null); // フォルダ入れハイライト
+      const [dropHint, setDropHint] = React.useState(null);
+      const [highlightFolderId, setHighlightFolderId] = React.useState(null);
       const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);
 
       // 保存UI
@@ -140,7 +199,14 @@
       const [lastSavedAt, setLastSavedAt] = React.useState(null);
       const saveTimerRef = React.useRef(null);
 
-      // items が変わるたびにデバウンス保存
+      // Gist 同期状態
+      const [gistToken, setGistToken] = React.useState(() => localStorage.getItem(GIST_TOKEN_KEY) || '');
+      const [gistId, setGistId] = React.useState(() => localStorage.getItem(GIST_ID_KEY) || '');
+      const [autoPush, setAutoPush] = React.useState(() => localStorage.getItem(AUTO_PUSH_KEY) === '1');
+      const [syncOpen, setSyncOpen] = React.useState(false);
+      const [syncMsg, setSyncMsg] = React.useState('');
+
+      // 自動保存（ローカル）
       React.useEffect(() => {
         setSaving(true);
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -148,11 +214,8 @@
           try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
             setLastSavedAt(Date.now());
-          } catch (e) {
-            console.error('保存に失敗しました: ', e);
-          } finally {
-            setSaving(false);
-          }
+          } catch (e) { console.error('保存失敗: ', e); }
+          setSaving(false);
         }, 300);
         return () => clearTimeout(saveTimerRef.current);
       }, [items]);
@@ -162,13 +225,28 @@
         const prevent = e => e.preventDefault();
         window.addEventListener('dragover', prevent);
         window.addEventListener('drop', prevent);
-        return () => {
-          window.removeEventListener('dragover', prevent);
-          window.removeEventListener('drop', prevent);
-        };
+        return () => { window.removeEventListener('dragover', prevent); window.removeEventListener('drop', prevent); };
       }, []);
 
-      /* ===== Note updater helper ===== */
+      // オートPush（節約のため 2 秒デバウンス）
+      const autoPushTimer = React.useRef(null);
+      React.useEffect(() => {
+        if (!autoPush || !gistToken || !gistId) return;
+        if (autoPushTimer.current) clearTimeout(autoPushTimer.current);
+        autoPushTimer.current = setTimeout(async () => {
+          try {
+            await gistUpdate(gistToken, gistId, items);
+            setSyncMsg('Gistへ自動保存しました');
+            setTimeout(()=> setSyncMsg(''), 1500);
+          } catch (e) {
+            setSyncMsg('自動保存に失敗: ' + e.message);
+            setTimeout(()=> setSyncMsg(''), 2500);
+          }
+        }, 2000);
+        return () => clearTimeout(autoPushTimer.current);
+      }, [items, autoPush, gistToken, gistId]);
+
+      /* ===== Note helpers ===== */
       const updateNoteById = (noteId, updater) => {
         const walk = (arr) => arr.map(it => {
           if (it.id === noteId && it.type === 'note') return updater({ ...it, blocks: it.blocks || [] });
@@ -178,22 +256,18 @@
         setItems(prev => walk(prev));
         setSelectedItem(prev => {
           if (!prev || prev.id !== noteId || prev.type !== 'note') return prev;
-          const next = updater({ ...prev, blocks: prev.blocks || [] });
-          return next;
+          return updater({ ...prev, blocks: prev.blocks || [] });
         });
       };
 
-      /* ===== Basics ===== */
+      /* ===== CRUD ===== */
       const removeItem = (arr, id) => arr.filter(it => {
         if (it.id === id) return false;
         if (it.children) it.children = removeItem(it.children, id);
         return true;
       });
-
       const addItemToParent = (arr, parentId, newItem) => arr.map(it => {
-        if (it.id === parentId && it.type === 'folder') {
-          return { ...it, children: [ ...(it.children || []), newItem ] };
-        }
+        if (it.id === parentId && it.type === 'folder') return { ...it, children: [ ...(it.children || []), newItem ] };
         if (it.children) return { ...it, children: addItemToParent(it.children, parentId, newItem) };
         return it;
       });
@@ -229,11 +303,10 @@
         setEditingItem(null);
         setEditValue('');
       };
-
       const handleCancelEdit = () => { setEditingItem(null); setEditValue(''); };
 
       const handleDeleteItem = (id, e) => {
-        e.stopPropagation();
+        e?.stopPropagation?.();
         setItems(removeItem(items, id));
         if (selectedItem?.id === id) setSelectedItem(null);
       };
@@ -246,24 +319,26 @@
           ...(type === 'folder' ? { expanded: true, children: [] } : { content: '', blocks: [] })
         };
         if (parentId) setItems(addItemToParent(items, parentId, newItem));
-        else setItems([ newItem, ...items ]); // ルートは先頭に
+        else setItems([ newItem, ...items ]);
       };
 
+      /* ===== Note content auto-resize ===== */
+      const noteTextareaRef = React.useRef(null);
+      const autoResize = el => { if (!el) return; el.style.height = 'auto'; el.style.height = (el.scrollHeight) + 'px'; };
+      React.useEffect(() => { autoResize(noteTextareaRef.current); }, [selectedItem?.id]);
       const handleContentChange = (content) => {
         if (!selectedItem || selectedItem.type !== 'note') return;
         updateNoteById(selectedItem.id, (note) => ({ ...note, content }));
+        requestAnimationFrame(()=> autoResize(noteTextareaRef.current));
       };
 
-      /* ===== Table Block APIs ===== */
-      const newId = (p='id') => `${p}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-
+      /* ===== Table Blocks ===== */
       const addTableBlock = (rows=3, cols=3) => {
         if (!selectedItem || selectedItem.type !== 'note') return;
         const data = Array.from({length: rows}, () => Array.from({length: cols}, () => ''));
         const block = { id: newId('tbl'), type: 'table', rows, cols, data, title: 'テーブル' };
         updateNoteById(selectedItem.id, (note) => ({ ...note, blocks: [...(note.blocks||[]), block] }));
       };
-
       const updateCell = (blockId, r, c, value) => {
         updateNoteById(selectedItem.id, (note) => {
           const blocks = (note.blocks||[]).map(b => {
@@ -274,44 +349,62 @@
           return { ...note, blocks };
         });
       };
-
       const addRow = (blockId) => {
         updateNoteById(selectedItem.id, (note) => {
-          const blocks = (note.blocks||[]).map(b => {
-            if (b.id !== blockId) return b;
-            const newRow = Array.from({length: b.cols}, () => '');
-            return { ...b, data: [...b.data, newRow], rows: b.rows + 1 };
-          });
+          const blocks = (note.blocks||[]).map(b => b.id!==blockId ? b : ({ ...b, data:[...b.data, Array.from({length:b.cols},()=> '')], rows:b.rows+1 }));
           return { ...note, blocks };
         });
       };
-
       const addCol = (blockId) => {
         updateNoteById(selectedItem.id, (note) => {
           const blocks = (note.blocks||[]).map(b => {
-            if (b.id !== blockId) return b;
-            const data = b.data.map(row => [...row, '']);
-            return { ...b, data, cols: b.cols + 1 };
+            if (b.id!==blockId) return b;
+            return { ...b, data: b.data.map(row=>[...row,'']), cols:b.cols+1 };
           });
           return { ...note, blocks };
         });
       };
-
       const deleteBlock = (blockId) => {
-        updateNoteById(selectedItem.id, (note) => {
-          const blocks = (note.blocks||[]).filter(b => b.id !== blockId);
-          return { ...note, blocks };
-        });
+        updateNoteById(selectedItem.id, (note) => ({ ...note, blocks: (note.blocks||[]).filter(b => b.id!==blockId) }));
       };
-
       const renameBlock = (blockId, title) => {
-        updateNoteById(selectedItem.id, (note) => {
-          const blocks = (note.blocks||[]).map(b => b.id===blockId ? { ...b, title } : b);
-          return { ...note, blocks };
-        });
+        updateNoteById(selectedItem.id, (note) => ({ ...note, blocks: (note.blocks||[]).map(b => b.id===blockId?{...b,title}:b) }));
       };
 
-      /* ===== DnD（フォルダ入れハイライト + 並べ替え） ===== */
+      /* ===== Reorder/Move (DnD) ===== */
+      const moveDraggedTo = (sourceId, targetId, mode/* 'before'|'after'|'into' */) => {
+        const srcPath = findPathById(items, sourceId); if (!srcPath) return;
+        const { newItems, removed } = removeByPath(items, srcPath);
+
+        if (mode === 'into') {
+          const tgtPath = findPathById(newItems, targetId); if (!tgtPath) { setItems(newItems); return; }
+          const inserted = insertIntoParentPath(newItems, [...tgtPath, 'children'], Number.MAX_SAFE_INTEGER, removed);
+          setItems(inserted);
+          return;
+        }
+
+        const tgtPath = findPathById(newItems, targetId); if (!tgtPath) { setItems(newItems); return; }
+        const { parentPath: tgtParentPath, index: tgtIndex } = getParentPathAndIndex(tgtPath);
+        const srcParentPathJSON = JSON.stringify(srcPath.slice(0, -1));
+        const tgtParentPathJSON = JSON.stringify(tgtParentPath);
+        let insertIndex = (mode === 'before') ? tgtIndex : tgtIndex + 1;
+        const sameParent = srcParentPathJSON === tgtParentPathJSON;
+        const srcIndex = srcPath[srcPath.length - 1];
+        if (sameParent && srcIndex < tgtIndex && mode === 'after') insertIndex -= 1;
+
+        const inserted = insertIntoParentPath(newItems, tgtParentPath, insertIndex, removed);
+        setItems(inserted);
+      };
+
+      const computeDropPosition = (e, targetEl, targetItem) => {
+        const rect = targetEl.getBoundingClientRect();
+        const y = e.clientY;
+        const topZone = rect.top + rect.height * 0.30;
+        const bottomZone = rect.bottom - rect.height * 0.30;
+        if (targetItem.type === 'folder' && y >= topZone && y <= bottomZone) return 'into';
+        return (y < rect.top + rect.height/2) ? 'before' : 'after';
+      };
+
       const handleDragStart = (e, item) => {
         setDraggedId(item.id);
         setHighlightFolderId(null);
@@ -321,106 +414,170 @@
           e.dataTransfer.setDragImage(e.currentTarget, 10, 10);
         }
       };
-
       const handleDragOverItem = (e, item) => {
-        e.preventDefault();
-        e.stopPropagation();
+        e.preventDefault(); e.stopPropagation();
         if (!draggedId || draggedId === item.id) return;
-
-        const rect = e.currentTarget.getBoundingClientRect();
-        const midY = rect.top + rect.height/2;
-        const nearCenter = Math.abs(e.clientY - midY) <= 10;
-
-        if (item.type === 'folder' && nearCenter) {
-          setHighlightFolderId(item.id);
-          setDropHint(null);
-          e.dataTransfer.dropEffect = 'move';
-          return;
+        const pos = computeDropPosition(e, e.currentTarget, item);
+        if (pos === 'into') {
+          setHighlightFolderId(item.id); setDropHint(null);
         } else {
-          setHighlightFolderId(null);
+          setHighlightFolderId(null); setDropHint({ targetId: item.id, pos });
         }
-
-        const pos = e.clientY < midY ? 'before' : 'after';
-        setDropHint({ targetId: item.id, pos });
         e.dataTransfer.dropEffect = 'move';
       };
-
       const handleDropOnItem = (e, targetItem) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const sourceId = draggedId;
-        setDraggedId(null);
-
-        if (!sourceId || sourceId === targetItem.id) {
-          setDropHint(null);
-          setHighlightFolderId(null);
-          return;
-        }
-
-        const rect = e.currentTarget.getBoundingClientRect();
-        const nearCenter = Math.abs(e.clientY - (rect.top + rect.height/2)) <= 10;
-        if (targetItem.type === 'folder' && nearCenter) {
-          const srcPath = findPathById(items, sourceId);
-          if (!srcPath) { setDropHint(null); setHighlightFolderId(null); return; }
-          const { newItems, removed } = removeByPath(items, srcPath);
-          const tgtPath = findPathById(newItems, targetItem.id);
-          const inserted = insertIntoParentPath(newItems, [...tgtPath, 'children'], Number.MAX_SAFE_INTEGER, removed);
-          setItems(inserted);
-          setDropHint(null);
-          setHighlightFolderId(null);
-          return;
-        }
-
-        const srcPath = findPathById(items, sourceId);
-        const tgtPath = findPathById(items, targetItem.id);
-        if (!srcPath || !tgtPath) { setDropHint(null); setHighlightFolderId(null); return; }
-
-        const { parentPath: srcParentPath, index: srcIndex } = getParentPathAndIndex(srcPath);
-        const { parentPath: tgtParentPath, index: tgtIndex } = getParentPathAndIndex(tgtPath);
-
-        const { newItems, removed } = removeByPath(items, srcPath);
-        let insertIndex = (dropHint?.pos === 'before') ? tgtIndex : tgtIndex + 1;
-        const sameParent = JSON.stringify(srcParentPath) === JSON.stringify(tgtParentPath);
-        if (sameParent && srcIndex < tgtIndex) insertIndex -= 1;
-
-        const inserted = insertIntoParentPath(newItems, tgtParentPath, insertIndex, removed);
-        setItems(inserted);
-        setDropHint(null);
-        setHighlightFolderId(null);
+        e.preventDefault(); e.stopPropagation();
+        const sourceId = draggedId; setDraggedId(null);
+        if (!sourceId || sourceId === targetItem.id) { setDropHint(null); setHighlightFolderId(null); return; }
+        const pos = computeDropPosition(e, e.currentTarget, targetItem);
+        moveDraggedTo(sourceId, targetItem.id, pos);
+        setDropHint(null); setHighlightFolderId(null);
       };
-
-      const handleRootDragOver = (e) => { e.preventDefault(); e.dataTransfer.dropEffect='move'; setHighlightFolderId(null); };
       const handleRootDrop = (e) => {
         e.preventDefault();
-        const sourceId = draggedId;
-        setDraggedId(null);
+        const sourceId = draggedId; setDraggedId(null);
         if (!sourceId) return;
-        const srcPath = findPathById(items, sourceId);
-        if (!srcPath) return;
+        const srcPath = findPathById(items, sourceId); if (!srcPath) return;
         const { newItems, removed } = removeByPath(items, srcPath);
         const inserted = insertIntoParentPath(newItems, [], 0, removed);
-        setItems(inserted);
-        setDropHint(null);
-        setHighlightFolderId(null);
+        setItems(inserted); setDropHint(null); setHighlightFolderId(null);
       };
 
-      /* ===== Table Block Editor ===== */
+      /* ===== Touch DnD (mobile handle) ===== */
+      const startTouchDrag = (e, item) => {
+        e.preventDefault();
+        setDraggedId(item.id);
+        const onMove = (ev) => {
+          const t = ev.touches ? ev.touches[0] : ev;
+          const el = document.elementFromPoint(t.clientX, t.clientY);
+          if (!el) return;
+          let node = el; while (node && !node.dataset?.treeId) node = node.parentElement;
+          if (!node || !node.dataset?.treeId) { setDropHint(null); setHighlightFolderId(null); return; }
+          const targetId = node.dataset.treeId;
+          if (targetId === item.id) { setDropHint(null); setHighlightFolderId(null); return; }
+          const rect = node.getBoundingClientRect();
+          const y = t.clientY, topZone = rect.top + rect.height*0.30, bottomZone = rect.bottom - rect.height*0.30;
+          const targetType = node.dataset.treeType;
+          if (targetType === 'folder' && y >= topZone && y <= bottomZone) { setHighlightFolderId(targetId); setDropHint(null); }
+          else { setHighlightFolderId(null); setDropHint({ targetId, pos: (y < rect.top + rect.height/2) ? 'before':'after' }); }
+          ev.preventDefault();
+        };
+        const onEnd = () => {
+          if (highlightFolderId) moveDraggedTo(item.id, highlightFolderId, 'into');
+          else if (dropHint?.targetId && dropHint?.pos) moveDraggedTo(item.id, dropHint.targetId, dropHint.pos);
+          setDropHint(null); setHighlightFolderId(null); setDraggedId(null);
+          window.removeEventListener('touchmove', onMove, { passive:false });
+          window.removeEventListener('touchend', onEnd);
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onEnd);
+        };
+        window.addEventListener('touchmove', onMove, { passive:false });
+        window.addEventListener('touchend', onEnd);
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onEnd);
+      };
+
+      /* ===== Export / Import / Reset ===== */
+      const fileInputRef = React.useRef(null);
+      const handleExport = () => {
+        const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'notepad-data.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      };
+      const handleImportClick = () => fileInputRef.current?.click();
+      const handleImportFile = (e) => {
+        const file = e.target.files?.[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            if (!Array.isArray(data)) throw new Error('JSONの形式が違います（配列ではありません）');
+            setItems(migrateItems(data)); setSelectedItem(null);
+          } catch (err) { alert('読み込みに失敗しました: ' + err.message); }
+          finally { e.target.value=''; }
+        };
+        reader.readAsText(file, 'utf-8');
+      };
+      const handleReset = () => {
+        if (!confirm('すべてのローカル保存を消して初期状態に戻します。よろしいですか？')) return;
+        localStorage.removeItem(STORAGE_KEY);
+        setItems(sampleItems());
+        setSelectedItem(null);
+      };
+
+      /* ===== Gist UI handlers ===== */
+      const saveToken = () => {
+        if (!gistToken) { alert('トークンを入力してください'); return; }
+        localStorage.setItem(GIST_TOKEN_KEY, gistToken);
+        setSyncMsg('トークンを保存しました');
+        setTimeout(()=> setSyncMsg(''), 1500);
+      };
+      const clearToken = () => {
+        localStorage.removeItem(GIST_TOKEN_KEY);
+        setGistToken(''); setSyncMsg('トークンを削除しました'); setTimeout(()=> setSyncMsg(''), 1500);
+      };
+      const linkGistId = (id) => {
+        if (!id) { alert('Gist ID を入力してください'); return; }
+        localStorage.setItem(GIST_ID_KEY, id);
+        setGistId(id); setSyncMsg('Gist をリンクしました'); setTimeout(()=> setSyncMsg(''), 1500);
+      };
+      const unlinkGist = () => {
+        localStorage.removeItem(GIST_ID_KEY);
+        setGistId(''); setSyncMsg('Gist リンクを解除しました'); setTimeout(()=> setSyncMsg(''), 1500);
+      };
+      const doCreateGist = async () => {
+        if (!gistToken) { alert('トークンが必要です'); return; }
+        try {
+          const id = await gistCreate(gistToken, items);
+          localStorage.setItem(GIST_ID_KEY, id);
+          setGistId(id);
+          setSyncMsg('新規Gistを作成しました');
+          setTimeout(()=> setSyncMsg(''), 1500);
+        } catch (e) {
+          alert('Gist作成に失敗: ' + e.message);
+        }
+      };
+      const doPush = async () => {
+        if (!gistToken || !gistId) { alert('トークンとGist IDが必要です'); return; }
+        try {
+          await gistUpdate(gistToken, gistId, items);
+          setSyncMsg('Gistへ保存しました');
+          setTimeout(()=> setSyncMsg(''), 1500);
+        } catch (e) {
+          alert('保存に失敗: ' + e.message);
+        }
+      };
+      const doPull = async () => {
+        if (!gistToken || !gistId) { alert('トークンとGist IDが必要です'); return; }
+        if (!confirm('Gistの内容で現在のメモを上書きします。よろしいですか？')) return;
+        try {
+          const data = await gistFetch(gistToken, gistId);
+          if (!Array.isArray(data)) throw new Error('Gist内の JSON が配列ではありません');
+          setItems(migrateItems(data)); setSelectedItem(null);
+          setSyncMsg('Gistから読み込みました');
+          setTimeout(()=> setSyncMsg(''), 1500);
+        } catch (e) {
+          alert('読み込みに失敗: ' + e.message);
+        }
+      };
+      const toggleAutoPush = () => {
+        const next = !autoPush; setAutoPush(next);
+        localStorage.setItem(AUTO_PUSH_KEY, next ? '1' : '0');
+        setSyncMsg(next ? '自動Pushを有効化' : '自動Pushを無効化');
+        setTimeout(()=> setSyncMsg(''), 1200);
+      };
+
+      /* ===== Table Block ===== */
       const TableBlock = ({ block }) => {
         const [title, setTitle] = React.useState(block.title || 'テーブル');
         React.useEffect(() => { setTitle(block.title || 'テーブル'); }, [block.id, block.title]);
-
         return (
           <div className="mb-4 border rounded-xl overflow-hidden bg-white shadow-sm">
             <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b">
               <div className="flex items-center gap-2">
                 <TableIcon size={18}/>
-                <input
-                  className="px-2 py-1 border rounded w-56 text-sm"
-                  value={title}
-                  onChange={(e)=>setTitle(e.target.value)}
-                  onBlur={()=>renameBlock(block.id, title)}
-                  placeholder="テーブル名"
-                />
+                <input className="px-2 py-1 border rounded w-56 text-sm" value={title}
+                  onChange={(e)=>setTitle(e.target.value)} onBlur={()=>renameBlock(block.id, title)} placeholder="テーブル名" />
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={()=>addRow(block.id)} className="px-2 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">行を追加</button>
@@ -428,7 +585,6 @@
                 <button onClick={()=>deleteBlock(block.id)} className="px-2 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700">削除</button>
               </div>
             </div>
-
             <div className="overflow-auto">
               <table className="min-w-full table-fixed border-collapse">
                 <tbody>
@@ -436,12 +592,9 @@
                     <tr key={ri}>
                       {row.map((cell, ci) => (
                         <td key={ci} className="border p-0 align-top">
-                          <input
-                            className="w-full p-2 outline-none"
-                            value={cell}
-                            onChange={(e)=>updateCell(block.id, ri, ci, e.target.value)}
-                            placeholder={`R${ri+1}C${ci+1}`}
-                          />
+                          <input className="w-full p-2 outline-none"
+                            value={cell} onChange={(e)=>updateCell(block.id, ri, ci, e.target.value)}
+                            placeholder={`R${ri+1}C${ci+1}`} />
                         </td>
                       ))}
                     </tr>
@@ -453,47 +606,7 @@
         );
       };
 
-      /* ===== Export / Import / Reset ===== */
-      const fileInputRef = React.useRef(null);
-
-      const handleExport = () => {
-        const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'notepad-data.json';
-        document.body.appendChild(a);
-        a.click(); a.remove(); URL.revokeObjectURL(url);
-      };
-
-      const handleImportClick = () => fileInputRef.current?.click();
-
-      const handleImportFile = (e) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          try {
-            const data = JSON.parse(reader.result);
-            if (!Array.isArray(data)) throw new Error('JSONの形式が違います（配列ではありません）');
-            setItems(migrateItems(data));
-            setSelectedItem(null);
-          } catch (err) {
-            alert('読み込みに失敗しました: ' + err.message);
-          } finally {
-            e.target.value = '';
-          }
-        };
-        reader.readAsText(file, 'utf-8');
-      };
-
-      const handleReset = () => {
-        if (!confirm('すべてのローカル保存を消して初期状態に戻します。よろしいですか？')) return;
-        localStorage.removeItem(STORAGE_KEY);
-        setItems(sampleItems());
-        setSelectedItem(null);
-      };
-
-      /* ===== Render item (sidebar tree) ===== */
+      /* ===== Sidebar item render ===== */
       const renderTreeItem = (item, depth=0) => {
         const isEditing = editingItem === item.id;
         const isDragged = draggedId === item.id;
@@ -503,13 +616,15 @@
 
         return (
           <div key={item.id}>
-            {hintBefore && <div className="h-0.5 bg-blue-500 mx-1 rounded" style={{marginLeft:`${depth*16+8}px`}}/>}
+            {hintBefore && <div className="drop-hint bg-blue-500 mx-1" style={{marginLeft:`${depth*16+8}px`}}/>}
 
             <div
-              className={`flex items-center py-2 px-2 rounded cursor-pointer select-none transition-colors group
+              data-tree-id={item.id}
+              data-tree-type={item.type}
+              className={`flex items-center py-2 px-2 rounded cursor-pointer select-none transition-colors
                 ${selectedItem?.id === item.id ? 'bg-blue-100' : isHighlightedFolder ? 'bg-yellow-100 ring-2 ring-yellow-300' : 'hover:bg-gray-100'}
                 ${isDragged ? 'opacity-50' : ''}`}
-              style={{ marginLeft: `${depth * 16}px` }}
+              style={{ marginLeft: `${depth * 16}px`, touchAction: 'manipulation' }}
               onClick={() => handleSelectItem(item)}
               draggable={!isEditing}
               onDragStart={(e)=>handleDragStart(e,item)}
@@ -546,8 +661,11 @@
               ) : (
                 <>
                   <span className="flex-1 text-sm">{item.name}</span>
-                  <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100">
-                    <button onClick={(e)=>handleStartEdit(item,e)} className="p-1 text-blue-600 hover:bg-blue-100 rounded"><Edit2 size={12}/></button>
+
+                  {/* モバイルでも常時表示のアクション */}
+                  <div className="flex items-center space-x-1">
+                    <button className="p-1 text-gray-600 hover:bg-gray-100 rounded md:hidden" title="ドラッグして並べ替え" onTouchStart={(e)=>startTouchDrag(e, item)}><Grip /></button>
+                    <button onClick={(e)=>handleStartEdit(item,e)} className="p-1 text-blue-600 hover:bg-blue-100 rounded" title="名前を編集"><Edit2 size={12}/></button>
                     {item.type === 'folder' && (
                       <>
                         <button onClick={(e)=>{e.stopPropagation();handleAddItem(item.id,'folder');}}
@@ -556,13 +674,13 @@
                                 className="p-1 text-green-600 hover:bg-green-100 rounded" title="メモを追加"><FileText size={12}/></button>
                       </>
                     )}
-                    <button onClick={(e)=>handleDeleteItem(item.id,e)} className="p-1 text-red-600 hover:bg-red-100 rounded"><Trash2 size={12}/></button>
+                    <button onClick={(e)=>handleDeleteItem(item.id,e)} className="p-1 text-red-600 hover:bg-red-100 rounded" title="削除"><Trash2 size={12}/></button>
                   </div>
                 </>
               )}
             </div>
 
-            {hintAfter && <div className="h-0.5 bg-blue-500 mx-1 rounded" style={{marginLeft:`${depth*16+8}px`}}/>}
+            {hintAfter && <div className="drop-hint bg-blue-500 mx-1" style={{marginLeft:`${depth*16+8}px`}}/>}
 
             {item.type === 'folder' && item.expanded && item.children && (
               <div>{item.children.map(ch => renderTreeItem(ch, depth+1))}</div>
@@ -574,6 +692,7 @@
       /* ===== Layout ===== */
       return (
         <div className="flex h-screen bg-gray-50 relative">
+          {/* Mobile overlay */}
           {isMobileMenuOpen && <div className="fixed inset-0 bg-black bg-opacity-50 z-10 md:hidden" onClick={()=>setIsMobileMenuOpen(false)}/>}
 
           {/* Sidebar */}
@@ -594,17 +713,8 @@
               </div>
             </div>
 
-            {/* Root drop zone（任意） */}
             <div onDragOver={(e)=>{e.preventDefault(); e.dataTransfer.dropEffect='move'; setHighlightFolderId(null);}}
-                 onDrop={(e)=>{
-                   e.preventDefault();
-                   const sourceId = draggedId; setDraggedId(null);
-                   if (!sourceId) return;
-                   const srcPath = findPathById(items, sourceId); if (!srcPath) return;
-                   const { newItems, removed } = removeByPath(items, srcPath);
-                   const inserted = insertIntoParentPath(newItems, [], 0, removed);
-                   setItems(inserted); setDropHint(null); setHighlightFolderId(null);
-                 }}
+                 onDrop={handleRootDrop}
                  className="m-2 mb-1 px-3 py-2 text-xs rounded border border-dashed border-blue-300 text-blue-700 bg-blue-50">
               👉 ここにドロップで最上階層へ（先頭に移動）
             </div>
@@ -649,6 +759,64 @@
                   <button onClick={handleImportClick} className="px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded">復元(JSON)</button>
                   <button onClick={handleReset} className="px-3 py-2 text-sm bg-red-50 hover:bg-red-100 text-red-700 rounded">初期化</button>
                   <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportFile}/>
+
+                  {/* GitHub 同期 ドロップダウン */}
+                  <div className="relative">
+                    <button onClick={()=>setSyncOpen(v=>!v)} className="px-3 py-2 text-sm bg-black text-white rounded hover:bg-gray-800">GitHub 同期</button>
+                    {syncOpen && (
+                      <div className="absolute right-0 mt-2 w-[360px] max-w-[90vw] bg-white border rounded-xl shadow-lg p-3 z-30 space-y-3">
+                        <div className="text-sm font-semibold">GitHub Gist 同期</div>
+                        {syncMsg && <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">{syncMsg}</div>}
+
+                        {/* Token */}
+                        <div className="space-y-1">
+                          <label className="text-xs text-gray-600">Personal Access Token（gist 権限）</label>
+                          <input type="password" value={gistToken} onChange={e=>setGistToken(e.target.value)}
+                                 placeholder="ghp_xxx / github_pat_xxx"
+                                 className="w-full px-2 py-2 border rounded"/>
+                          <div className="flex gap-2">
+                            <button onClick={saveToken} className="px-3 py-2 text-sm bg-gray-800 text-white rounded hover:bg-gray-700">トークンを保存</button>
+                            <button onClick={clearToken} className="px-3 py-2 text-sm bg-gray-100 rounded hover:bg-gray-200">削除</button>
+                          </div>
+                          <div className="text-[11px] text-gray-500">※ トークンはこのブラウザの localStorage に保存されます。共有端末では入力しないでください。</div>
+                        </div>
+
+                        <hr/>
+
+                        {/* Gist link/create */}
+                        <div className="space-y-2">
+                          <div className="text-xs text-gray-600">Gist ID をリンクするか、新規作成します</div>
+                          <div className="flex gap-2">
+                            <input type="text" placeholder="既存の Gist ID（例: a1b2c3...）" className="flex-1 px-2 py-2 border rounded"
+                                   value={gistId} onChange={e=>setGistId(e.target.value)} />
+                            <button onClick={()=>linkGistId(gistId)} className="px-3 py-2 text-sm bg-gray-100 rounded hover:bg-gray-200">リンク</button>
+                          </div>
+                          <button onClick={doCreateGist} className="w-full px-3 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">現在の内容で 新規Gistを作成</button>
+                          {gistId && (
+                            <a href={`https://gist.github.com/${gistId}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 underline">
+                              Gist を開く
+                            </a>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center justify-between pt-2">
+                          <div className="flex gap-2">
+                            <button onClick={doPull} className="px-3 py-2 text-sm bg-gray-100 rounded hover:bg-gray-200">Pull（読み込み）</button>
+                            <button onClick={doPush} className="px-3 py-2 text-sm bg-gray-900 text-white rounded hover:bg-gray-800">Push（保存）</button>
+                          </div>
+                          <label className="flex items-center gap-2 text-xs">
+                            <input type="checkbox" checked={autoPush} onChange={toggleAutoPush}/>
+                            自動Push
+                          </label>
+                        </div>
+
+                        <div className="flex justify-end">
+                          <button onClick={unlinkGist} className="text-xs text-red-600 hover:underline">Gist リンク解除</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -657,18 +825,19 @@
               <>
                 {selectedItem.type==='note' ? (
                   <div className="flex-1 p-4 space-y-4 overflow-auto">
-                    {/* 本文 */}
+                    {/* 本文（自動リサイズ） */}
                     <div className="bg-white border rounded-xl">
                       <div className="px-3 py-2 text-xs text-gray-500 border-b bg-gray-50 rounded-t-xl">本文</div>
                       <textarea
+                        ref={noteTextareaRef}
                         value={selectedItem.content || ''}
                         onChange={(e)=>handleContentChange(e.target.value)}
                         placeholder="ここにメモを書いてください..."
-                        className="w-full h-48 p-4 border-0 focus:outline-none rounded-b-xl"
+                        className="w-full min-h-[3rem] p-4 border-0 focus:outline-none rounded-b-xl resize-none overflow-hidden"
                       />
                     </div>
 
-                    {/* ブロック（テーブルなど） */}
+                    {/* ブロック */}
                     <div>
                       <div className="px-1 pb-2 text-xs text-gray-500">ブロック</div>
                       {(selectedItem.blocks && selectedItem.blocks.length > 0) ? (
