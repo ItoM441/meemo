@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>階層メモ帳</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Roboto",sans-serif}</style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    /* ===== Icons ===== */
+    const ChevronDown = ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9l6 6 6-6"/></svg>);
+    const ChevronRight= ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>);
+    const Folder      = ({ size=24, className="" }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>);
+    const FileText    = ({ size=24, className="" }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>);
+    const Plus        = ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14"/></svg>);
+    const Edit2       = ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>);
+    const Trash2      = ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>);
+    const Save        = ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></svg>);
+    const X           = ({ size=24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>);
+
+    /* ===== Robust tree utils ===== */
+    const clone = (o) => JSON.parse(JSON.stringify(o));
+
+    function findPathById(items, id, path = []) {
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (it.id === id) return [...path, i];
+        if (it.type === 'folder' && Array.isArray(it.children) && it.children.length) {
+          const p = findPathById(it.children, id, [...path, i, 'children']);
+          if (p) return p;
+        }
+      }
+      return null;
+    }
+
+    function getArrayFromParentPath(rootClone, parentPath) {
+      let arr = rootClone;
+      let obj = null;
+      for (const token of parentPath) {
+        if (token === 'children') {
+          if (!obj) throw new Error('Invalid path: children without object');
+          if (!Array.isArray(obj.children)) obj.children = [];
+          arr = obj.children;
+          obj = null;
+        } else {
+          obj = arr[token];
+          if (!obj) throw new Error('Invalid path index');
+        }
+      }
+      return arr;
+    }
+
+    function removeByPath(items, fullPath) {
+      const cloned = clone(items);
+      const parentPath = fullPath.slice(0, -1);
+      const index = fullPath[fullPath.length - 1];
+      const parentArr = getArrayFromParentPath(cloned, parentPath);
+      const removed = parentArr.splice(index, 1)[0];
+      return { newItems: cloned, removed };
+    }
+
+    function insertIntoParentPath(items, parentPath, index, node) {
+      const cloned = clone(items);
+      const targetArr = getArrayFromParentPath(cloned, parentPath);
+      const safeIndex = Math.max(0, Math.min(targetArr.length, index));
+      targetArr.splice(safeIndex, 0, node);
+      return cloned;
+    }
+
+    function getParentPathAndIndex(path) {
+      return { parentPath: path.slice(0, -1), index: path[path.length - 1] };
+    }
+
+    /* ===== App ===== */
+    const HierarchicalNotepad = () => {
+      const [items, setItems] = React.useState([
+        {
+          id: '1', type: 'folder', name: 'プロジェクト', expanded: true,
+          children: [
+            { id: '2', type: 'note', name: 'アイデア', content: 'ここにメモの内容を書きます...' },
+            { id: '3', type: 'folder', name: '設計', expanded: false,
+              children: [{ id: '4', type: 'note', name: 'UI設計', content: 'ユーザーインターフェースの設計について...' }] }
+          ]
+        },
+        { id: '5', type: 'note', name: '日記', content: '今日は良い一日でした。' }
+      ]);
+
+      const [selectedItem, setSelectedItem] = React.useState(null);
+      const [editingItem, setEditingItem] = React.useState(null);
+      const [editValue, setEditValue] = React.useState('');
+      const [draggedId, setDraggedId] = React.useState(null);
+      const [dropHint, setDropHint] = React.useState(null); // {targetId, pos:'before'|'after'}
+      const [highlightFolderId, setHighlightFolderId] = React.useState(null); // ★フォルダ入れハイライト
+      const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);
+
+      // 画面外誤ドロップ防止（任意）
+      React.useEffect(() => {
+        const prevent = e => e.preventDefault();
+        window.addEventListener('dragover', prevent);
+        window.addEventListener('drop', prevent);
+        return () => {
+          window.removeEventListener('dragover', prevent);
+          window.removeEventListener('drop', prevent);
+        };
+      }, []);
+
+      /* Basics */
+      const removeItem = (arr, id) => arr.filter(it => {
+        if (it.id === id) return false;
+        if (it.children) it.children = removeItem(it.children, id);
+        return true;
+      });
+
+      const addItemToParent = (arr, parentId, newItem) => arr.map(it => {
+        if (it.id === parentId && it.type === 'folder') {
+          return { ...it, children: [ ...(it.children || []), newItem ] };
+        }
+        if (it.children) return { ...it, children: addItemToParent(it.children, parentId, newItem) };
+        return it;
+      });
+
+      const handleToggleExpand = (id) => {
+        const walk = a => a.map(it => {
+          if (it.id === id) return { ...it, expanded: !it.expanded };
+          if (it.children) return { ...it, children: walk(it.children) };
+          return it;
+        });
+        setItems(walk(items));
+      };
+
+      const handleSelectItem = (item) => {
+        setSelectedItem(item);
+        setEditingItem(null);
+        if (window.innerWidth < 768) setIsMobileMenuOpen(false);
+      };
+
+      const handleStartEdit = (item, e) => {
+        e.stopPropagation();
+        setEditingItem(item.id);
+        setEditValue(item.name);
+      };
+
+      const handleSaveEdit = () => {
+        const walk = a => a.map(it => {
+          if (it.id === editingItem) return { ...it, name: editValue };
+          if (it.children) return { ...it, children: walk(it.children) };
+          return it;
+        });
+        setItems(walk(items));
+        setEditingItem(null);
+        setEditValue('');
+      };
+
+      const handleCancelEdit = () => { setEditingItem(null); setEditValue(''); };
+
+      const handleDeleteItem = (id, e) => {
+        e.stopPropagation();
+        setItems(removeItem(items, id));
+        if (selectedItem?.id === id) setSelectedItem(null);
+      };
+
+      const handleAddItem = (parentId, type) => {
+        const newItem = {
+          id: Date.now().toString(),
+          type,
+          name: type === 'folder' ? '新しいフォルダ' : '新しいメモ',
+          ...(type === 'folder' ? { expanded: true, children: [] } : { content: '' })
+        };
+        if (parentId) setItems(addItemToParent(items, parentId, newItem));
+        else setItems([ newItem, ...items ]); // ルートは先頭に
+      };
+
+      const handleContentChange = (content) => {
+        if (!selectedItem) return;
+        const walk = a => a.map(it => {
+          if (it.id === selectedItem.id) return { ...it, content };
+          if (it.children) return { ...it, children: walk(it.children) };
+          return it;
+        });
+        setItems(walk(items));
+        setSelectedItem({ ...selectedItem, content });
+      };
+
+      /* DnD */
+      const handleDragStart = (e, item) => {
+        setDraggedId(item.id);
+        setHighlightFolderId(null); // ★開始時は消す
+        try { e.dataTransfer.setData('text/plain', item.id); } catch {}
+        e.dataTransfer.effectAllowed = 'move';
+        if (e.currentTarget && e.dataTransfer.setDragImage) {
+          e.dataTransfer.setDragImage(e.currentTarget, 10, 10);
+        }
+      };
+
+      const handleDragOverItem = (e, item) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!draggedId || draggedId === item.id) return;
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        const midY = rect.top + rect.height/2;
+        const delta = e.clientY - midY;
+        const nearCenter = Math.abs(delta) <= 10; // ★中央付近閾値
+
+        if (item.type === 'folder' && nearCenter) {
+          // 中央ゾーン → フォルダをハイライト、線ヒントは非表示
+          setHighlightFolderId(item.id);
+          setDropHint(null);
+          e.dataTransfer.dropEffect = 'move';
+          return;
+        } else {
+          setHighlightFolderId(null);
+        }
+
+        // それ以外は上下の前/後ヒント
+        const pos = e.clientY < midY ? 'before' : 'after';
+        setDropHint({ targetId: item.id, pos });
+        e.dataTransfer.dropEffect = 'move';
+      };
+
+      const handleDropOnItem = (e, targetItem) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const sourceId = draggedId;
+        setDraggedId(null);
+
+        if (!sourceId || sourceId === targetItem.id) {
+          setDropHint(null);
+          setHighlightFolderId(null);
+          return;
+        }
+
+        // フォルダ中央付近は「中へ」優先
+        const rect = e.currentTarget.getBoundingClientRect();
+        const nearCenter = Math.abs(e.clientY - (rect.top + rect.height/2)) <= 10;
+        if (targetItem.type === 'folder' && nearCenter) {
+          const srcPath = findPathById(items, sourceId);
+          if (!srcPath) { setDropHint(null); setHighlightFolderId(null); return; }
+          const { newItems, removed } = removeByPath(items, srcPath);
+          const tgtPath = findPathById(newItems, targetItem.id);
+          const inserted = insertIntoParentPath(newItems, [...tgtPath, 'children'], Number.MAX_SAFE_INTEGER, removed);
+          setItems(inserted);
+          setDropHint(null);
+          setHighlightFolderId(null); // ★ドロップ後に消す
+          return;
+        }
+
+        // target の直前/直後へ（親が違ってもOK）
+        const srcPath = findPathById(items, sourceId);
+        const tgtPath = findPathById(items, targetItem.id);
+        if (!srcPath || !tgtPath) { setDropHint(null); setHighlightFolderId(null); return; }
+
+        const { parentPath: srcParentPath, index: srcIndex } = getParentPathAndIndex(srcPath);
+        const { parentPath: tgtParentPath, index: tgtIndex } = getParentPathAndIndex(tgtPath);
+
+        const { newItems, removed } = removeByPath(items, srcPath);
+
+        let insertIndex = (dropHint?.pos === 'before') ? tgtIndex : tgtIndex + 1;
+        const sameParent = JSON.stringify(srcParentPath) === JSON.stringify(tgtParentPath);
+        if (sameParent && srcIndex < tgtIndex) insertIndex -= 1;
+
+        const inserted = insertIntoParentPath(newItems, tgtParentPath, insertIndex, removed);
+        setItems(inserted);
+        setDropHint(null);
+        setHighlightFolderId(null);
+      };
+
+      const handleRootDragOver = (e) => { e.preventDefault(); e.dataTransfer.dropEffect='move'; setHighlightFolderId(null); };
+      const handleRootDrop = (e) => {
+        e.preventDefault();
+        const sourceId = draggedId;
+        setDraggedId(null);
+        if (!sourceId) return;
+        const srcPath = findPathById(items, sourceId);
+        if (!srcPath) return;
+        const { newItems, removed } = removeByPath(items, srcPath);
+        const inserted = insertIntoParentPath(newItems, [], 0, removed);
+        setItems(inserted);
+        setDropHint(null);
+        setHighlightFolderId(null);
+      };
+
+      /* Render */
+      const renderTreeItem = (item, depth=0) => {
+        const isEditing = editingItem === item.id;
+        const isDragged = draggedId === item.id;
+        const isHighlightedFolder = item.type === 'folder' && highlightFolderId === item.id;
+
+        const hintBefore = dropHint?.targetId === item.id && dropHint?.pos === 'before';
+        const hintAfter  = dropHint?.targetId === item.id && dropHint?.pos === 'after';
+
+        return (
+          <div key={item.id}>
+            {hintBefore && <div className="h-0.5 bg-blue-500 mx-1 rounded" style={{marginLeft:`${depth*16+8}px`}}/>}
+
+            <div
+              className={`flex items-center py-2 px-2 rounded cursor-pointer select-none transition-colors group
+                ${selectedItem?.id === item.id ? 'bg-blue-100' : isHighlightedFolder ? 'bg-yellow-100 ring-2 ring-yellow-300' : 'hover:bg-gray-100'}
+                ${isDragged ? 'opacity-50' : ''}`}
+              style={{ marginLeft: `${depth * 16}px` }}
+              onClick={() => handleSelectItem(item)}
+              draggable={!isEditing}
+              onDragStart={(e)=>handleDragStart(e,item)}
+              onDragEnter={(e)=>handleDragOverItem(e,item)}
+              onDragOver={(e)=>handleDragOverItem(e,item)}
+              onDrop={(e)=>handleDropOnItem(e,item)}
+            >
+              {item.type === 'folder' && (
+                <button onClick={(e)=>{e.stopPropagation();handleToggleExpand(item.id);}}
+                        className="mr-1 p-1 hover:bg-gray-200 rounded">
+                  {item.expanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
+                </button>
+              )}
+
+              <div className="mr-2 flex-shrink-0">
+                {item.type === 'folder'
+                  ? <Folder size={16} className={isHighlightedFolder ? "text-yellow-600" : "text-blue-600"} />
+                  : <FileText size={16} className="text-gray-600" />
+                }
+              </div>
+
+              {isEditing ? (
+                <div className="flex items-center flex-1">
+                  <input
+                    value={editValue}
+                    onChange={(e)=>setEditValue(e.target.value)}
+                    onKeyDown={(e)=>{ if(e.key==='Enter') handleSaveEdit(); if(e.key==='Escape') handleCancelEdit(); }}
+                    className="flex-1 px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    autoFocus
+                  />
+                  <button onClick={handleSaveEdit} className="ml-2 p-1 text-green-600 hover:bg-green-100 rounded"><Save size={14}/></button>
+                  <button onClick={handleCancelEdit} className="ml-1 p-1 text-red-600 hover:bg-red-100 rounded"><X size={14}/></button>
+                </div>
+              ) : (
+                <>
+                  <span className="flex-1 text-sm">{item.name}</span>
+                  <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100">
+                    <button onClick={(e)=>handleStartEdit(item,e)} className="p-1 text-blue-600 hover:bg-blue-100 rounded"><Edit2 size={12}/></button>
+                    {item.type === 'folder' && (
+                      <>
+                        <button onClick={(e)=>{e.stopPropagation();handleAddItem(item.id,'folder');}}
+                                className="p-1 text-blue-600 hover:bg-blue-100 rounded" title="フォルダを追加"><Folder size={12}/></button>
+                        <button onClick={(e)=>{e.stopPropagation();handleAddItem(item.id,'note');}}
+                                className="p-1 text-green-600 hover:bg-green-100 rounded" title="メモを追加"><FileText size={12}/></button>
+                      </>
+                    )}
+                    <button onClick={(e)=>handleDeleteItem(item.id,e)} className="p-1 text-red-600 hover:bg-red-100 rounded"><Trash2 size={12}/></button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {hintAfter && <div className="h-0.5 bg-blue-500 mx-1 rounded" style={{marginLeft:`${depth*16+8}px`}}/>}
+
+            {item.type === 'folder' && item.expanded && item.children && (
+              <div>{item.children.map(ch => renderTreeItem(ch, depth+1))}</div>
+            )}
+          </div>
+        );
+      };
+
+      return (
+        <div className="flex h-screen bg-gray-50 relative">
+          {isMobileMenuOpen && <div className="fixed inset-0 bg-black bg-opacity-50 z-10 md:hidden" onClick={()=>setIsMobileMenuOpen(false)}/>}
+
+          {/* Sidebar */}
+          <div className={`${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
+              fixed inset-y-0 left-0 z-20 w-80 bg-white border-r border-gray-200 flex flex-col transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0 md:w-1/3`}>
+            <div className="p-4 border-b border-gray-200">
+              <div className="flex items-center justify-between mb-4">
+                <h1 className="text-xl font-bold text-gray-800">階層メモ帳</h1>
+                <button onClick={()=>setIsMobileMenuOpen(false)} className="md:hidden p-2 hover:bg-gray-100 rounded"><X size={20}/></button>
+              </div>
+              <div className="flex space-x-2">
+                <button onClick={()=>handleAddItem(null,'folder')} className="flex items-center px-3 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors">
+                  <Folder size={16} className="mr-1"/>フォルダ
+                </button>
+                <button onClick={()=>handleAddItem(null,'note')} className="flex items-center px-3 py-2 text-sm bg-green-600 text-white rounded hover:bg-green-700 transition-colors">
+                  <FileText size={16} className="mr-1"/>メモ
+                </button>
+              </div>
+            </div>
+
+            {/* Root drop zone（任意） */}
+            <div onDragOver={handleRootDragOver} onDrop={handleRootDrop}
+                 className="m-2 mb-1 px-3 py-2 text-xs rounded border border-dashed border-blue-300 text-blue-700 bg-blue-50">
+              👉 ここにドロップで最上階層へ（先頭に移動）
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2">
+              {items.map(item => renderTreeItem(item))}
+            </div>
+          </div>
+
+          {/* Main */}
+          <div className="flex-1 flex flex-col min-w-0">
+            <div className="md:hidden flex items-center justify-between p-4 bg-white border-b border-gray-200">
+              <button onClick={()=>setIsMobileMenuOpen(true)} className="p-2 hover:bg-gray-100 rounded"><Folder size={20}/></button>
+              <h2 className="text-lg font-semibold text-gray-800">{selectedItem ? selectedItem.name : '階層メモ帳'}</h2>
+              <div className="w-10"></div>
+            </div>
+
+            {selectedItem ? (
+              <>
+                <div className="hidden md:block p-4 border-b border-gray-200 bg-white">
+                  <div className="flex items-center">
+                    {selectedItem.type==='folder' ? <Folder size={20} className="mr-2 text-blue-600"/> : <FileText size={20} className="mr-2 text-gray-600"/>}
+                    <h2 className="text-lg font-semibold text-gray-800">{selectedItem.name}</h2>
+                  </div>
+                </div>
+
+                {selectedItem.type==='note' && (
+                  <div className="flex-1 p-4">
+                    <textarea value={selectedItem.content||''} onChange={(e)=>handleContentChange(e.target.value)}
+                              placeholder="ここにメモを書いてください..." className="w-full h-full p-4 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                  </div>
+                )}
+
+                {selectedItem.type==='folder' && (
+                  <div className="flex-1 flex items-center justify-center text-gray-500">
+                    <div className="text-center">
+                      <Folder size={48} className="mx-auto mb-4 text-gray-400"/>
+                      <p>フォルダが選択されています</p>
+                      <p className="text-sm">メモを選択して編集してください</p>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-gray-500">
+                <div className="text-center">
+                  <FileText size={48} className="mx-auto mb-4 text-gray-400"/>
+                  <p>メモまたはフォルダを選択してください</p>
+                  <p className="text-sm">左側のサイドバーからアイテムをクリックしてください</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<HierarchicalNotepad/>, document.getElementById('root'));
+  </script>
+</body>
+</html>
